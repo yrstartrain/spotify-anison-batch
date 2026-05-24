@@ -47,6 +47,8 @@ EXCLUDE_WORDS = [
     "子守唄", "lullaby", "睡眠", "relax", "リラックス",
     # カバー・アレンジバージョン系
     "bossa nova", "cover", "カバー",
+    # 8bit・ヒーリング系（アーティスト名に含まれるケースも多い）
+    "8bit", "8ビット", "ヒーリング", "healing",
     # その他
     "short ver", "short version",
 ]
@@ -119,8 +121,9 @@ def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str)
 def is_excluded(track: dict) -> bool:
     track_name = track.get("name", "").lower()
     album_name = track["album"].get("name", "").lower()
+    artist_names = " ".join(a["name"] for a in track.get("artists", [])).lower()
     for word in EXCLUDE_WORDS:
-        if word in track_name or word in album_name:
+        if word in track_name or word in album_name or word in artist_names:
             return True
     return False
 
@@ -188,9 +191,16 @@ def main():
         "アニソン", "アニメ主題歌", "TVアニメ", "アニメED", "アニメOP",
         # 声優・アーティスト系
         "声優", "アニソンアーティスト",
-        # 人気フランチャイズ系
-        "アイドルマスター", "ラブライブ", "バンドリ", "プロジェクトセカイ",
-        "ガンダム", "プリキュア", "ウマ娘",
+        # 萌え・アイドルアニメ系フランチャイズ
+        "アイドルマスター", "THE IDOLM@STER",
+        "ラブライブ", "Love Live",
+        "バンドリ", "BanG Dream",
+        "プロジェクトセカイ", "プロセカ",
+        "ウマ娘", "プリコネ",
+        # その他人気フランチャイズ
+        "ガンダム", "プリキュア",
+        # 主要アニメ音楽レーベル
+        "ランティス", "SACRA MUSIC",
     ]
     for keyword in keywords:
         found = search_tracks(sp, keyword, date_from, date_to)
