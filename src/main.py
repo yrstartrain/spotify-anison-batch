@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import logging
+import requests
 from datetime import datetime, timedelta, timezone
 
 import spotipy
@@ -26,39 +27,13 @@ MAX_ADD_PER_RUN = 20
 DAYS_LOOKBACK = 14
 MAX_RETRIES = 3
 
-# トラック名・アルバム名・アーティスト名にこれらが含まれる曲を除外する
-EXCLUDE_WORDS = [
-    # オルゴール・アレンジ系
-    "オルゴール", "music box", "musicbox",
-    "ピアノ", "piano",
-    "アコースティック", "acoustic",
-    "ギター", "guitar",
-    "オーケストラ", "orchestra",
-    "アレンジ", "arrange",
-    # ボーカルなし系
-    "instrumental", "インストゥルメンタル", "インスト",
-    "off vocal", "offvocal", "カラオケ", "karaoke",
-    "backing track",
-    # 朗読・ナレーション系
-    "朗読", "ナレーション", "narration", "読み聞かせ",
-    # 効果音・BGM系
-    "bgm", "se ", "効果音",
-    # 子守唄・リラックス系
-    "子守唄", "lullaby", "睡眠", "relax", "リラックス",
-    # カバー・アレンジバージョン系
-    "bossa nova", "cover", "カバー",
-    # 8bit・ヒーリング系（アーティスト名に含まれるケースも多い）
-    "8bit", "8ビット", "ヒーリング", "healing",
-    # その他
-    "short ver", "short version",
+# Spotify Japan が管理するアニメ編集プレイリスト
+EDITORIAL_PLAYLIST_IDS = [
+    "37i9dQZF1E4suFKubfL1R8",  # Anime de Japan Radio
+    "37i9dQZF1E4Cz38vKP0fPr",  # Anime Song Club! JAPAN Radio
 ]
 
-# アーティスト名が完全一致する場合に除外する（ノイズアーティスト）
-EXCLUDE_ARTISTS = {
-    "totodit",  # フランス語EDM（アニメキャラ名を流用）
-}
-
-# フランチャイズ・レーベル系キーワード（優先して追加する）
+# フランチャイズ・レーベル系キーワード（編集PL/AniListで拾えなかった分の補完）
 PRIORITY_KEYWORDS = [
     "アイドルマスター", "THE IDOLM@STER",
     "ラブライブ", "Love Live",
@@ -69,12 +44,40 @@ PRIORITY_KEYWORDS = [
     "SACRA MUSIC", "ランティス",
 ]
 
-# 一般キーワード（優先キーワードで拾えなかった曲を補完）
+# 一般キーワード（最終補完）
 GENERAL_KEYWORDS = [
     "アニソン", "アニメ主題歌", "TVアニメ", "アニメED", "アニメOP",
     "声優", "アニソンアーティスト",
 ]
 
+# トラック名・アルバム名・アーティスト名にこれらが含まれる曲を除外する
+EXCLUDE_WORDS = [
+    "オルゴール", "music box", "musicbox",
+    "ピアノ", "piano",
+    "アコースティック", "acoustic",
+    "ギター", "guitar",
+    "オーケストラ", "orchestra",
+    "アレンジ", "arrange",
+    "instrumental", "インストゥルメンタル", "インスト",
+    "off vocal", "offvocal", "カラオケ", "karaoke",
+    "backing track",
+    "朗読", "ナレーション", "narration", "読み聞かせ",
+    "bgm", "se ", "効果音",
+    "子守唄", "lullaby", "睡眠", "relax", "リラックス",
+    "bossa nova", "cover", "カバー",
+    "8bit", "8ビット", "ヒーリング", "healing",
+    "short ver", "short version",
+]
+
+# アーティスト名が完全一致する場合に除外（ノイズアーティスト）
+EXCLUDE_ARTISTS = {
+    "totodit",
+}
+
+ANILIST_API = "https://graphql.anilist.co"
+
+
+# ── Spotify クライアント ──────────────────────────────────────────────
 
 def get_spotify_client() -> spotipy.Spotify:
     auth_manager = SpotifyOAuth(
@@ -101,6 +104,8 @@ def with_retry(fn, *args, **kwargs):
     raise RuntimeError(f"Failed after {MAX_RETRIES} retries")
 
 
+# ── 日付ユーティリティ ────────────────────────────────────────────────
+
 def get_date_range() -> tuple[str, str]:
     jst = timezone(timedelta(hours=9))
     today = datetime.now(jst).date()
@@ -108,11 +113,58 @@ def get_date_range() -> tuple[str, str]:
     return str(since), str(today)
 
 
+def get_current_season() -> tuple[str, int]:
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    month, year = now.month, now.year
+    if month in [1, 2, 3]:
+        return "WINTER", year
+    elif month in [4, 5, 6]:
+        return "SPRING", year
+    elif month in [7, 8, 9]:
+        return "SUMMER", year
+    else:
+        return "FALL", year
+
+
+# ── AniList: 今期アニメタイトル取得 ──────────────────────────────────
+
+def get_current_season_titles(limit: int = 25) -> list[str]:
+    season, year = get_current_season()
+    query = """
+    query ($season: MediaSeason, $year: Int, $limit: Int) {
+      Page(page: 1, perPage: $limit) {
+        media(
+          season: $season, seasonYear: $year,
+          type: ANIME, status: RELEASING,
+          sort: POPULARITY_DESC
+        ) {
+          title { native romaji }
+        }
+      }
+    }
+    """
+    try:
+        resp = requests.post(
+            ANILIST_API,
+            json={"query": query, "variables": {"season": season, "year": year, "limit": limit}},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        media_list = resp.json()["data"]["Page"]["media"]
+        titles = [m["title"]["native"] for m in media_list if m["title"]["native"]]
+        logger.info(f"AniList: {season} {year} — {len(titles)} airing anime titles")
+        return titles
+    except Exception as e:
+        logger.warning(f"AniList fetch failed: {e}")
+        return []
+
+
+# ── Spotify 検索 ──────────────────────────────────────────────────────
+
 def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str) -> list[dict]:
-    """Search for tracks and return list of track objects."""
     results = []
     full_query = f"{query} year:{date_from[:4]}"
-
     offset = 0
     limit = 50
     while offset < 200:
@@ -127,18 +179,52 @@ def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str)
         items = response["tracks"]["items"]
         if not items:
             break
-
         for track in items:
             release_date = track["album"].get("release_date", "")
             if release_date >= date_from:
                 results.append(track)
-
         if len(items) < limit:
             break
         offset += limit
-
     return results
 
+
+# ── Spotify 編集プレイリストから取得 ─────────────────────────────────
+
+def get_editorial_tracks(sp: spotipy.Spotify, playlist_ids: list[str], date_from: str) -> list[dict]:
+    tracks = []
+    seen: set[str] = set()
+    for pid in playlist_ids:
+        try:
+            offset = 0
+            count = 0
+            while True:
+                resp = with_retry(
+                    sp.playlist_items,
+                    pid,
+                    limit=100,
+                    offset=offset,
+                    fields="items(track(id,name,artists,album(name,release_date))),next",
+                )
+                for item in resp.get("items", []):
+                    track = item.get("track")
+                    if not track or not track.get("id"):
+                        continue
+                    release_date = track["album"].get("release_date", "")
+                    if release_date >= date_from and track["id"] not in seen:
+                        seen.add(track["id"])
+                        tracks.append(track)
+                        count += 1
+                if not resp.get("next"):
+                    break
+                offset += 100
+            logger.info(f"Editorial playlist {pid}: {count} tracks in date range")
+        except Exception as e:
+            logger.warning(f"Editorial playlist {pid} failed: {e}")
+    return tracks
+
+
+# ── フィルタ ──────────────────────────────────────────────────────────
 
 def is_excluded(track: dict) -> bool:
     track_name = track.get("name", "").lower()
@@ -146,12 +232,10 @@ def is_excluded(track: dict) -> bool:
     artists = track.get("artists", [])
     artist_names_combined = " ".join(a["name"] for a in artists).lower()
 
-    # アーティスト名の完全一致チェック
     for a in artists:
         if a["name"].lower() in EXCLUDE_ARTISTS:
             return True
 
-    # ワードチェック（トラック名・アルバム名・アーティスト名）
     for word in EXCLUDE_WORDS:
         if word in track_name or word in album_name or word in artist_names_combined:
             return True
@@ -159,25 +243,31 @@ def is_excluded(track: dict) -> bool:
     return False
 
 
+# ── プレイリスト管理 ──────────────────────────────────────────────────
+
 def get_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> set[str]:
     existing = set()
     offset = 0
-    limit = 100
     while True:
-        response = with_retry(sp.playlist_items, playlist_id, limit=limit, offset=offset, fields="items.track.id,next")
+        response = with_retry(
+            sp.playlist_items,
+            playlist_id,
+            limit=100,
+            offset=offset,
+            fields="items.track.id,next",
+        )
         for item in response["items"]:
             track = item.get("track")
             if track and track.get("id"):
                 existing.add(track["id"])
         if not response.get("next"):
             break
-        offset += limit
+        offset += 100
     return existing
 
 
 def ensure_playlist(sp: spotipy.Spotify) -> str:
     global PLAYLIST_ID
-
     if PLAYLIST_ID:
         try:
             with_retry(sp.playlist, PLAYLIST_ID)
@@ -200,6 +290,8 @@ def ensure_playlist(sp: spotipy.Spotify) -> str:
     return new_id
 
 
+# ── メイン ────────────────────────────────────────────────────────────
+
 def main():
     logger.info("=== Spotify Anison Batch Start ===")
 
@@ -209,31 +301,43 @@ def main():
 
     playlist_id = ensure_playlist(sp)
 
-    # Route A: genre:anime
-    logger.info("Route A: genre:anime search")
-    route_a = search_tracks(sp, "genre:anime", date_from, date_to)
-    logger.info(f"Route A results: {len(route_a)} tracks")
+    # ── Source 1: Spotify 編集プレイリスト（最高品質）
+    logger.info("--- Source 1: Spotify editorial playlists ---")
+    editorial_tracks = get_editorial_tracks(sp, EDITORIAL_PLAYLIST_IDS, date_from)
 
-    # Route B-1: フランチャイズ・レーベル系（優先）
-    logger.info("Route B-1: priority keyword search")
+    # ── Source 2: AniList 今期アニメ OP/ED
+    logger.info("--- Source 2: Current season OP/ED (AniList) ---")
+    season_titles = get_current_season_titles(limit=25)
+    season_tracks = []
+    for title in season_titles:
+        found = search_tracks(sp, f'"{title}"', date_from, date_to)
+        if found:
+            logger.info(f"  '{title}': {len(found)} tracks")
+        season_tracks.extend(found)
+    logger.info(f"Season OP/ED total: {len(season_tracks)} tracks")
+
+    # ── Source 3: フランチャイズ・レーベル系キーワード（補完）
+    logger.info("--- Source 3: Franchise/label keywords ---")
     priority_tracks = []
     for keyword in PRIORITY_KEYWORDS:
         found = search_tracks(sp, keyword, date_from, date_to)
-        logger.info(f"  [priority] '{keyword}': {len(found)} tracks")
+        if found:
+            logger.info(f"  '{keyword}': {len(found)} tracks")
         priority_tracks.extend(found)
 
-    # Route B-2: 一般キーワード（補完）
-    logger.info("Route B-2: general keyword search")
+    # ── Source 4: 一般キーワード（最終補完）
+    logger.info("--- Source 4: General keywords ---")
     general_tracks = []
     for keyword in GENERAL_KEYWORDS:
         found = search_tracks(sp, keyword, date_from, date_to)
-        logger.info(f"  [general] '{keyword}': {len(found)} tracks")
+        if found:
+            logger.info(f"  '{keyword}': {len(found)} tracks")
         general_tracks.extend(found)
 
-    # Merge: 優先キーワード → genre:anime → 一般キーワード の順で重複除去
+    # ── マージ（優先順: 編集PL → 今期OP/ED → フランチャイズ → 一般）
     seen_ids: set[str] = set()
     candidates: list[dict] = []
-    for track in priority_tracks + route_a + general_tracks:
+    for track in editorial_tracks + season_tracks + priority_tracks + general_tracks:
         tid = track.get("id")
         if tid and tid not in seen_ids:
             seen_ids.add(tid)
@@ -244,16 +348,16 @@ def main():
         logger.info("No candidates found. Exiting normally.")
         return
 
-    # Exclude unwanted tracks by keyword
+    # ── 除外フィルタ
     before = len(candidates)
     candidates = [t for t in candidates if not is_excluded(t)]
-    logger.info(f"After keyword filter: {len(candidates)} tracks (excluded {before - len(candidates)})")
+    logger.info(f"After exclusion filter: {len(candidates)} tracks (excluded {before - len(candidates)})")
 
     if not candidates:
-        logger.info("No candidates after keyword filter. Exiting normally.")
+        logger.info("No candidates after filter. Exiting normally.")
         return
 
-    # Exclude already-in-playlist tracks
+    # ── 既存プレイリストとの重複除去
     existing_ids = get_playlist_track_ids(sp, playlist_id)
     new_tracks = [t for t in candidates if t["id"] not in existing_ids]
     logger.info(f"After duplicate exclusion: {len(new_tracks)} new tracks")
@@ -262,7 +366,7 @@ def main():
         logger.info("All candidates already in playlist. Exiting normally.")
         return
 
-    # Add up to MAX_ADD_PER_RUN tracks
+    # ── プレイリストに追加
     to_add = new_tracks[:MAX_ADD_PER_RUN]
     uris = [f"spotify:track:{t['id']}" for t in to_add]
     with_retry(sp.playlist_add_items, playlist_id, uris)
@@ -272,9 +376,8 @@ def main():
         artists = ", ".join(a["name"] for a in track["artists"])
         logger.info(f"  {track['name']} - {artists}")
 
-    skipped = len(new_tracks) - len(to_add)
-    logger.info(f"Skipped (over limit): {skipped}")
-    logger.info(f"Already in playlist (skipped): {len(candidates) - len(new_tracks)}")
+    logger.info(f"Skipped (over limit): {len(new_tracks) - len(to_add)}")
+    logger.info(f"Already in playlist: {len(candidates) - len(new_tracks)}")
     logger.info("=== Spotify Anison Batch Complete ===")
 
 
