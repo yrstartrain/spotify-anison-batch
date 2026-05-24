@@ -26,6 +26,29 @@ MAX_ADD_PER_RUN = 20
 DAYS_LOOKBACK = 7
 MAX_RETRIES = 3
 
+# トラック名・アルバム名にこれらが含まれる曲を除外する
+EXCLUDE_WORDS = [
+    # オルゴール・アレンジ系
+    "オルゴール", "music box", "musicbox",
+    "ピアノ", "piano",
+    "アコースティック", "acoustic",
+    "ギター", "guitar",
+    "オーケストラ", "orchestra",
+    "アレンジ", "arrange",
+    # ボーカルなし系
+    "instrumental", "インストゥルメンタル", "インスト",
+    "off vocal", "offvocal", "カラオケ", "karaoke",
+    "backing track",
+    # 朗読・ナレーション系
+    "朗読", "ナレーション", "narration", "読み聞かせ",
+    # 効果音・BGM系
+    "bgm", "se ", "効果音",
+    # 子守唄・リラックス系
+    "子守唄", "lullaby", "睡眠", "relax", "リラックス",
+    # その他
+    "short ver", "short version",
+]
+
 
 def get_spotify_client() -> spotipy.Spotify:
     auth_manager = SpotifyOAuth(
@@ -89,6 +112,15 @@ def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str)
         offset += limit
 
     return results
+
+
+def is_excluded(track: dict) -> bool:
+    track_name = track.get("name", "").lower()
+    album_name = track["album"].get("name", "").lower()
+    for word in EXCLUDE_WORDS:
+        if word in track_name or word in album_name:
+            return True
+    return False
 
 
 def get_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> set[str]:
@@ -166,6 +198,15 @@ def main():
 
     if not candidates:
         logger.info("No candidates found. Exiting normally.")
+        return
+
+    # Exclude unwanted tracks by keyword
+    before = len(candidates)
+    candidates = [t for t in candidates if not is_excluded(t)]
+    logger.info(f"After keyword filter: {len(candidates)} tracks (excluded {before - len(candidates)})")
+
+    if not candidates:
+        logger.info("No candidates after keyword filter. Exiting normally.")
         return
 
     # Exclude already-in-playlist tracks
