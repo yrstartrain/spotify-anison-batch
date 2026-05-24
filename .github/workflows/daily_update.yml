@@ -1,4 +1,4 @@
-name: Daily Anison Update
+name: "Daily Anison Update"
 
 on:
   schedule:
