@@ -23,7 +23,7 @@ PLAYLIST_NAME = "アニソン Daily Mix"
 PLAYLIST_DESCRIPTION = "毎日自動追加：新着アニソン"
 
 MAX_ADD_PER_RUN = 20
-DAYS_LOOKBACK = 7
+DAYS_LOOKBACK = 14
 MAX_RETRIES = 3
 
 # トラック名・アルバム名にこれらが含まれる曲を除外する
