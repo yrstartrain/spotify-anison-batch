@@ -18,7 +18,7 @@ import requests
 
 CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID") or input("SPOTIFY_CLIENT_ID: ").strip()
 CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET") or input("SPOTIFY_CLIENT_SECRET: ").strip()
-REDIRECT_URI = "http://localhost:8888/callback"
+REDIRECT_URI = "http://127.0.0.1:8888/callback"
 SCOPE = "playlist-modify-public playlist-modify-private playlist-read-private"
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
@@ -59,8 +59,8 @@ def main():
     print(f"\nOpening browser for Spotify authorization...\nURL: {url}\n")
     webbrowser.open(url)
 
-    server = HTTPServer(("localhost", 8888), CallbackHandler)
-    print("Waiting for callback on http://localhost:8888/callback ...")
+    server = HTTPServer(("127.0.0.1", 8888), CallbackHandler)
+    print("Waiting for callback on http://127.0.0.1:8888/callback ...")
     server.handle_request()
 
     if not auth_code:
