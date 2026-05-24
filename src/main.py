@@ -45,6 +45,8 @@ EXCLUDE_WORDS = [
     "bgm", "se ", "効果音",
     # 子守唄・リラックス系
     "子守唄", "lullaby", "睡眠", "relax", "リラックス",
+    # カバー・アレンジバージョン系
+    "bossa nova", "cover", "カバー",
     # その他
     "short ver", "short version",
 ]
@@ -181,7 +183,16 @@ def main():
     # Route B: keyword-based
     logger.info("Route B: keyword search")
     route_b = []
-    for keyword in ["アニソン", "アニメ", "声優", "アニソンアーティスト"]:
+    keywords = [
+        # 一般アニソン系
+        "アニソン", "アニメ主題歌", "TVアニメ", "アニメED", "アニメOP",
+        # 声優・アーティスト系
+        "声優", "アニソンアーティスト",
+        # 人気フランチャイズ系
+        "アイドルマスター", "ラブライブ", "バンドリ", "プロジェクトセカイ",
+        "ガンダム", "プリキュア", "ウマ娘",
+    ]
+    for keyword in keywords:
         found = search_tracks(sp, keyword, date_from, date_to)
         logger.info(f"  keyword '{keyword}': {len(found)} tracks")
         route_b.extend(found)
