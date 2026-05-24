@@ -26,7 +26,7 @@ MAX_ADD_PER_RUN = 20
 DAYS_LOOKBACK = 14
 MAX_RETRIES = 3
 
-# トラック名・アルバム名にこれらが含まれる曲を除外する
+# トラック名・アルバム名・アーティスト名にこれらが含まれる曲を除外する
 EXCLUDE_WORDS = [
     # オルゴール・アレンジ系
     "オルゴール", "music box", "musicbox",
@@ -51,6 +51,28 @@ EXCLUDE_WORDS = [
     "8bit", "8ビット", "ヒーリング", "healing",
     # その他
     "short ver", "short version",
+]
+
+# アーティスト名が完全一致する場合に除外する（ノイズアーティスト）
+EXCLUDE_ARTISTS = {
+    "totodit",  # フランス語EDM（アニメキャラ名を流用）
+}
+
+# フランチャイズ・レーベル系キーワード（優先して追加する）
+PRIORITY_KEYWORDS = [
+    "アイドルマスター", "THE IDOLM@STER",
+    "ラブライブ", "Love Live",
+    "バンドリ", "BanG Dream",
+    "プロジェクトセカイ", "プロセカ",
+    "ウマ娘", "プリコネ",
+    "ガンダム", "プリキュア",
+    "SACRA MUSIC", "ランティス",
+]
+
+# 一般キーワード（優先キーワードで拾えなかった曲を補完）
+GENERAL_KEYWORDS = [
+    "アニソン", "アニメ主題歌", "TVアニメ", "アニメED", "アニメOP",
+    "声優", "アニソンアーティスト",
 ]
 
 
@@ -121,10 +143,19 @@ def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str)
 def is_excluded(track: dict) -> bool:
     track_name = track.get("name", "").lower()
     album_name = track["album"].get("name", "").lower()
-    artist_names = " ".join(a["name"] for a in track.get("artists", [])).lower()
-    for word in EXCLUDE_WORDS:
-        if word in track_name or word in album_name or word in artist_names:
+    artists = track.get("artists", [])
+    artist_names_combined = " ".join(a["name"] for a in artists).lower()
+
+    # アーティスト名の完全一致チェック
+    for a in artists:
+        if a["name"].lower() in EXCLUDE_ARTISTS:
             return True
+
+    # ワードチェック（トラック名・アルバム名・アーティスト名）
+    for word in EXCLUDE_WORDS:
+        if word in track_name or word in album_name or word in artist_names_combined:
+            return True
+
     return False
 
 
@@ -183,34 +214,26 @@ def main():
     route_a = search_tracks(sp, "genre:anime", date_from, date_to)
     logger.info(f"Route A results: {len(route_a)} tracks")
 
-    # Route B: keyword-based
-    logger.info("Route B: keyword search")
-    route_b = []
-    keywords = [
-        # 一般アニソン系
-        "アニソン", "アニメ主題歌", "TVアニメ", "アニメED", "アニメOP",
-        # 声優・アーティスト系
-        "声優", "アニソンアーティスト",
-        # 萌え・アイドルアニメ系フランチャイズ
-        "アイドルマスター", "THE IDOLM@STER",
-        "ラブライブ", "Love Live",
-        "バンドリ", "BanG Dream",
-        "プロジェクトセカイ", "プロセカ",
-        "ウマ娘", "プリコネ",
-        # その他人気フランチャイズ
-        "ガンダム", "プリキュア",
-        # 主要アニメ音楽レーベル
-        "ランティス", "SACRA MUSIC",
-    ]
-    for keyword in keywords:
+    # Route B-1: フランチャイズ・レーベル系（優先）
+    logger.info("Route B-1: priority keyword search")
+    priority_tracks = []
+    for keyword in PRIORITY_KEYWORDS:
         found = search_tracks(sp, keyword, date_from, date_to)
-        logger.info(f"  keyword '{keyword}': {len(found)} tracks")
-        route_b.extend(found)
+        logger.info(f"  [priority] '{keyword}': {len(found)} tracks")
+        priority_tracks.extend(found)
 
-    # Merge and deduplicate
+    # Route B-2: 一般キーワード（補完）
+    logger.info("Route B-2: general keyword search")
+    general_tracks = []
+    for keyword in GENERAL_KEYWORDS:
+        found = search_tracks(sp, keyword, date_from, date_to)
+        logger.info(f"  [general] '{keyword}': {len(found)} tracks")
+        general_tracks.extend(found)
+
+    # Merge: 優先キーワード → genre:anime → 一般キーワード の順で重複除去
     seen_ids: set[str] = set()
     candidates: list[dict] = []
-    for track in route_a + route_b:
+    for track in priority_tracks + route_a + general_tracks:
         tid = track.get("id")
         if tid and tid not in seen_ids:
             seen_ids.add(tid)
