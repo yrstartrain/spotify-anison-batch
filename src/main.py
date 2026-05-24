@@ -1,0 +1,231 @@
+import os
+import sys
+import time
+import logging
+from datetime import datetime, timedelta, timezone
+
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+CLIENT_ID = os.environ["SPOTIFY_CLIENT_ID"]
+CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
+REFRESH_TOKEN = os.environ["SPOTIFY_REFRESH_TOKEN"]
+PLAYLIST_ID = os.environ.get("SPOTIFY_PLAYLIST_ID", "")
+
+PLAYLIST_NAME = "アニソン Daily Mix (BPM 135-160)"
+PLAYLIST_DESCRIPTION = "毎日自動追加：新着アニソン BPM 135〜160"
+
+BPM_MIN = 135
+BPM_MAX = 160
+MAX_ADD_PER_RUN = 20
+DAYS_LOOKBACK = 7
+MAX_RETRIES = 3
+
+
+def get_spotify_client() -> spotipy.Spotify:
+    auth_manager = SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri="http://localhost:8888/callback",
+        scope="playlist-modify-public playlist-modify-private playlist-read-private",
+    )
+    token_info = auth_manager.refresh_access_token(REFRESH_TOKEN)
+    return spotipy.Spotify(auth=token_info["access_token"])
+
+
+def with_retry(fn, *args, **kwargs):
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except spotipy.exceptions.SpotifyException as e:
+            if e.http_status == 429:
+                retry_after = int(e.headers.get("Retry-After", 2 ** attempt))
+                logger.warning(f"Rate limited. Retrying in {retry_after}s (attempt {attempt}/{MAX_RETRIES})")
+                time.sleep(retry_after)
+            else:
+                raise
+    raise RuntimeError(f"Failed after {MAX_RETRIES} retries")
+
+
+def get_date_range() -> tuple[str, str]:
+    jst = timezone(timedelta(hours=9))
+    today = datetime.now(jst).date()
+    since = today - timedelta(days=DAYS_LOOKBACK)
+    return str(since), str(today)
+
+
+def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str) -> list[dict]:
+    """Search for tracks and return list of track objects."""
+    results = []
+    full_query = f"{query} year:{date_from[:4]}"
+
+    offset = 0
+    limit = 50
+    while offset < 200:
+        response = with_retry(
+            sp.search,
+            q=full_query,
+            type="track",
+            limit=limit,
+            offset=offset,
+            market="JP",
+        )
+        items = response["tracks"]["items"]
+        if not items:
+            break
+
+        for track in items:
+            release_date = track["album"].get("release_date", "")
+            if release_date >= date_from:
+                results.append(track)
+
+        if len(items) < limit:
+            break
+        offset += limit
+
+    return results
+
+
+def get_audio_features_bulk(sp: spotipy.Spotify, track_ids: list[str]) -> dict[str, dict]:
+    """Fetch audio features for up to 100 tracks at a time."""
+    features_map = {}
+    for i in range(0, len(track_ids), 100):
+        batch = track_ids[i : i + 100]
+        response = with_retry(sp.audio_features, batch)
+        for feat in response:
+            if feat:
+                features_map[feat["id"]] = feat
+    return features_map
+
+
+def get_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> set[str]:
+    existing = set()
+    offset = 0
+    limit = 100
+    while True:
+        response = with_retry(sp.playlist_items, playlist_id, limit=limit, offset=offset, fields="items.track.id,next")
+        for item in response["items"]:
+            track = item.get("track")
+            if track and track.get("id"):
+                existing.add(track["id"])
+        if not response.get("next"):
+            break
+        offset += limit
+    return existing
+
+
+def ensure_playlist(sp: spotipy.Spotify) -> str:
+    global PLAYLIST_ID
+
+    if PLAYLIST_ID:
+        try:
+            with_retry(sp.playlist, PLAYLIST_ID)
+            logger.info(f"Playlist found: {PLAYLIST_ID}")
+            return PLAYLIST_ID
+        except spotipy.exceptions.SpotifyException:
+            logger.warning("SPOTIFY_PLAYLIST_ID is set but playlist not found. Creating new one.")
+
+    user_id = with_retry(sp.current_user)["id"]
+    playlist = with_retry(
+        sp.user_playlist_create,
+        user=user_id,
+        name=PLAYLIST_NAME,
+        public=True,
+        description=PLAYLIST_DESCRIPTION,
+    )
+    new_id = playlist["id"]
+    logger.info(f"Created new playlist: {new_id}")
+    logger.info(f"ACTION REQUIRED: Set SPOTIFY_PLAYLIST_ID={new_id} in GitHub Secrets")
+    return new_id
+
+
+def main():
+    logger.info("=== Spotify Anison Batch Start ===")
+
+    sp = get_spotify_client()
+    date_from, date_to = get_date_range()
+    logger.info(f"Search range: {date_from} to {date_to}")
+
+    playlist_id = ensure_playlist(sp)
+
+    # Route A: genre:anime
+    logger.info("Route A: genre:anime search")
+    route_a = search_tracks(sp, "genre:anime", date_from, date_to)
+    logger.info(f"Route A results: {len(route_a)} tracks")
+
+    # Route B: keyword-based
+    logger.info("Route B: keyword search")
+    route_b = []
+    for keyword in ["アニソン", "アニメ", "声優", "アニソンアーティスト"]:
+        found = search_tracks(sp, keyword, date_from, date_to)
+        logger.info(f"  keyword '{keyword}': {len(found)} tracks")
+        route_b.extend(found)
+
+    # Merge and deduplicate
+    seen_ids: set[str] = set()
+    candidates: list[dict] = []
+    for track in route_a + route_b:
+        tid = track.get("id")
+        if tid and tid not in seen_ids:
+            seen_ids.add(tid)
+            candidates.append(track)
+    logger.info(f"Merged candidates: {len(candidates)} unique tracks")
+
+    if not candidates:
+        logger.info("No candidates found. Exiting normally.")
+        return
+
+    # Audio features BPM filter
+    candidate_ids = [t["id"] for t in candidates]
+    features_map = get_audio_features_bulk(sp, candidate_ids)
+
+    bpm_filtered = [
+        t for t in candidates
+        if t["id"] in features_map
+        and BPM_MIN <= features_map[t["id"]]["tempo"] <= BPM_MAX
+    ]
+    logger.info(f"After BPM filter ({BPM_MIN}-{BPM_MAX}): {len(bpm_filtered)} tracks")
+
+    if not bpm_filtered:
+        logger.info("No tracks matched BPM range. Exiting normally.")
+        return
+
+    # Exclude already-in-playlist tracks
+    existing_ids = get_playlist_track_ids(sp, playlist_id)
+    new_tracks = [t for t in bpm_filtered if t["id"] not in existing_ids]
+    logger.info(f"After duplicate exclusion: {len(new_tracks)} new tracks")
+
+    if not new_tracks:
+        logger.info("All candidates already in playlist. Exiting normally.")
+        return
+
+    # Add up to MAX_ADD_PER_RUN tracks
+    to_add = new_tracks[:MAX_ADD_PER_RUN]
+    uris = [f"spotify:track:{t['id']}" for t in to_add]
+    with_retry(sp.playlist_add_items, playlist_id, uris)
+
+    logger.info(f"Added {len(to_add)} tracks to playlist:")
+    for track in to_add:
+        artists = ", ".join(a["name"] for a in track["artists"])
+        bpm = round(features_map[track["id"]]["tempo"], 1)
+        logger.info(f"  [{bpm} BPM] {track['name']} - {artists}")
+
+    skipped = len(new_tracks) - len(to_add)
+    logger.info(f"Skipped (over limit): {skipped}")
+    logger.info(f"Already in playlist (skipped): {len(bpm_filtered) - len(new_tracks)}")
+    logger.info("=== Spotify Anison Batch Complete ===")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
