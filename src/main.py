@@ -19,11 +19,9 @@ CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
 REFRESH_TOKEN = os.environ["SPOTIFY_REFRESH_TOKEN"]
 PLAYLIST_ID = os.environ.get("SPOTIFY_PLAYLIST_ID", "")
 
-PLAYLIST_NAME = "アニソン Daily Mix (BPM 135-160)"
-PLAYLIST_DESCRIPTION = "毎日自動追加：新着アニソン BPM 135〜160"
+PLAYLIST_NAME = "アニソン Daily Mix"
+PLAYLIST_DESCRIPTION = "毎日自動追加：新着アニソン"
 
-BPM_MIN = 135
-BPM_MAX = 160
 MAX_ADD_PER_RUN = 20
 DAYS_LOOKBACK = 7
 MAX_RETRIES = 3
@@ -91,18 +89,6 @@ def search_tracks(sp: spotipy.Spotify, query: str, date_from: str, date_to: str)
         offset += limit
 
     return results
-
-
-def get_audio_features_bulk(sp: spotipy.Spotify, track_ids: list[str]) -> dict[str, dict]:
-    """Fetch audio features for up to 100 tracks at a time."""
-    features_map = {}
-    for i in range(0, len(track_ids), 100):
-        batch = track_ids[i : i + 100]
-        response = with_retry(sp.audio_features, batch)
-        for feat in response:
-            if feat:
-                features_map[feat["id"]] = feat
-    return features_map
 
 
 def get_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> set[str]:
@@ -182,24 +168,9 @@ def main():
         logger.info("No candidates found. Exiting normally.")
         return
 
-    # Audio features BPM filter
-    candidate_ids = [t["id"] for t in candidates]
-    features_map = get_audio_features_bulk(sp, candidate_ids)
-
-    bpm_filtered = [
-        t for t in candidates
-        if t["id"] in features_map
-        and BPM_MIN <= features_map[t["id"]]["tempo"] <= BPM_MAX
-    ]
-    logger.info(f"After BPM filter ({BPM_MIN}-{BPM_MAX}): {len(bpm_filtered)} tracks")
-
-    if not bpm_filtered:
-        logger.info("No tracks matched BPM range. Exiting normally.")
-        return
-
     # Exclude already-in-playlist tracks
     existing_ids = get_playlist_track_ids(sp, playlist_id)
-    new_tracks = [t for t in bpm_filtered if t["id"] not in existing_ids]
+    new_tracks = [t for t in candidates if t["id"] not in existing_ids]
     logger.info(f"After duplicate exclusion: {len(new_tracks)} new tracks")
 
     if not new_tracks:
@@ -214,12 +185,11 @@ def main():
     logger.info(f"Added {len(to_add)} tracks to playlist:")
     for track in to_add:
         artists = ", ".join(a["name"] for a in track["artists"])
-        bpm = round(features_map[track["id"]]["tempo"], 1)
-        logger.info(f"  [{bpm} BPM] {track['name']} - {artists}")
+        logger.info(f"  {track['name']} - {artists}")
 
     skipped = len(new_tracks) - len(to_add)
     logger.info(f"Skipped (over limit): {skipped}")
-    logger.info(f"Already in playlist (skipped): {len(bpm_filtered) - len(new_tracks)}")
+    logger.info(f"Already in playlist (skipped): {len(candidates) - len(new_tracks)}")
     logger.info("=== Spotify Anison Batch Complete ===")
 
 
